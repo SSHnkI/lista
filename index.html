@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minhas Listas Compartilhadas</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, addDoc, doc, updateDoc, deleteDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+        // Variáveis globais para Firebase (fornecidas pelo ambiente Canvas)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Será atualizado após a autenticação
+
+        // --- Funções Auxiliares ---
+        function showMessage(message, isError = false) {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = message;
+            messageBox.className = `fixed bottom-4 left-1/2 -translate-x-1/2 p-3 rounded-lg shadow-lg text-white ${isError ? 'bg-red-500' : 'bg-green-500'} transition-opacity duration-300 opacity-100`;
+            setTimeout(() => {
+                messageBox.classList.remove('opacity-100');
+                messageBox.classList.add('opacity-0');
+            }, 3000); // Esconde a mensagem após 3 segundos
+        }
+
+        // --- Inicialização do Firebase e Autenticação ---
+        async function initializeFirebaseAndAuth() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `Seu ID: ${userId}`;
+                        console.log("Usuário autenticado:", userId);
+                        // Carrega os dados somente após o usuário estar autenticado
+                        loadListItems('neca');
+                        loadListItems('neco');
+                    } else {
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            console.error("Erro na autenticação:", error);
+                            showMessage("Erro ao autenticar. Tente novamente.", true);
+                            // Define um ID de usuário temporário se a autenticação falhar
+                            userId = `anon-${crypto.randomUUID().substring(0, 8)}`;
+                            document.getElementById('user-id-display').textContent = `Seu ID (Anônimo): ${userId}`;
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Erro ao inicializar Firebase:", error);
+                showMessage("Erro ao inicializar o aplicativo. Recarregue a página.", true);
+            }
+        }
+
+        // --- Funções CRUD do Firestore ---
+
+        // Função para obter o caminho da coleção com base no tipo de lista
+        function getCollectionPath(listType) {
+            // Armazenamento de dados privados do usuário
+            return `artifacts/${appId}/users/${userId}/${listType}_items`;
+        }
+
+        // Adicionar um item ao Firestore
+        async function addItemToFirestore(listType, text) {
+            if (!db || !userId) {
+                console.warn("Firestore não inicializado ou userId não disponível.");
+                showMessage("Aguarde a inicialização.", true);
+                return;
+            }
+            try {
+                const docRef = await addDoc(collection(db, getCollectionPath(listType)), {
+                    text: text,
+                    timestamp: Date.now() // Para ordenar os itens
+                });
+                showMessage(`Item adicionado à lista ${listType.toUpperCase()}.`);
+                return docRef.id; // Retorna o ID do documento recém-criado
+            } catch (e) {
+                console.error("Erro ao adicionar documento: ", e);
+                showMessage(`Erro ao adicionar item à lista ${listType.toUpperCase()}.`, true);
+                return null;
+            }
+        }
+
+        // Atualizar um item no Firestore
+        async function updateItemInFirestore(listType, docId, newText) {
+            if (!db || !userId) {
+                console.warn("Firestore não inicializado ou userId não disponível.");
+                showMessage("Aguarde a inicialização.", true);
+                return;
+            }
+            try {
+                const itemDocRef = doc(db, getCollectionPath(listType), docId);
+                await updateDoc(itemDocRef, {
+                    text: newText,
+                    timestamp: Date.now() // Atualiza o timestamp para refletir a última modificação
+                });
+                showMessage(`Item atualizado na lista ${listType.toUpperCase()}.`);
+            } catch (e) {
+                console.error("Erro ao atualizar documento: ", e);
+                showMessage(`Erro ao atualizar item da lista ${listType.toUpperCase()}.`, true);
+            }
+        }
+
+        // Excluir um item do Firestore
+        async function deleteItemFromFirestore(listType, docId) {
+            if (!db || !userId) {
+                console.warn("Firestore não inicializado ou userId não disponível.");
+                showMessage("Aguarde a inicialização.", true);
+                return;
+            }
+            try {
+                await deleteDoc(doc(db, getCollectionPath(listType), docId));
+                showMessage(`Item excluído da lista ${listType.toUpperCase()}.`);
+            } catch (e) {
+                console.error("Erro ao excluir documento: ", e);
+                showMessage(`Erro ao excluir item da lista ${listType.toUpperCase()}.`, true);
+            }
+        }
+
+        // Carregar itens do Firestore em tempo real
+        function loadListItems(listType) {
+            if (!db || !userId) {
+                console.warn("Firestore não inicializado ou userId não disponível para carregar.");
+                return;
+            }
+            // Importante: orderBy("timestamp", "asc") é usado para manter a ordem,
+            // mas se precisar de filtragem complexa ou ordenação por múltiplos campos
+            // em grandes datasets, pode ser necessário criar índices no Firestore.
+            const q = query(collection(db, getCollectionPath(listType)), orderBy("timestamp", "asc"));
+
+            onSnapshot(q, (snapshot) => {
+                const listUl = document.getElementById(`${listType}-list`);
+                listUl.innerHTML = ''; // Limpa a lista existente no DOM
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    createListItem(data.text, listUl, doc.id, listType);
+                });
+                showMessage(`Lista ${listType.toUpperCase()} sincronizada.`, false);
+            }, (error) => {
+                console.error("Erro ao carregar itens da lista:", error);
+                showMessage(`Erro ao carregar lista ${listType.toUpperCase()}.`, true);
+            });
+        }
+
+        // --- Geração de Elementos da UI ---
+
+        // Função para criar um novo item de lista no DOM
+        function createListItem(text, listUl, docId, listType) {
+            const listItem = document.createElement('li');
+            listItem.className = 'list-item';
+            listItem.dataset.docId = docId; // Armazena o ID do documento Firestore no elemento
+
+            const textSpan = document.createElement('span');
+            textSpan.textContent = text;
+            textSpan.className = 'flex-grow mr-4 text-gray-700';
+
+            const buttonsDiv = document.createElement('div');
+            buttonsDiv.className = 'list-item-buttons';
+
+            // Botão Editar
+            const editButton = document.createElement('button');
+            editButton.textContent = 'Editar';
+            editButton.className = 'px-3 py-1 bg-yellow-400 text-white rounded-md text-sm hover:bg-yellow-500 transition duration-200';
+            editButton.onclick = () => {
+                textSpan.style.display = 'none';
+                buttonsDiv.style.display = 'none';
+
+                const editInput = document.createElement('input');
+                editInput.type = 'text';
+                editInput.value = textSpan.textContent;
+                editInput.className = 'flex-grow p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-yellow-500';
+                listItem.prepend(editInput);
+
+                const saveButton = document.createElement('button');
+                saveButton.textContent = 'Salvar';
+                saveButton.className = 'px-3 py-1 ml-2 bg-green-500 text-white rounded-md text-sm hover:bg-green-600 transition duration-200';
+                saveButton.onclick = async () => {
+                    const newText = editInput.value.trim();
+                    if (newText !== '') {
+                        await updateItemInFirestore(listType, docId, newText);
+                    }
+                    textSpan.textContent = newText;
+                    textSpan.style.display = 'block';
+                    buttonsDiv.style.display = 'flex';
+                    editInput.remove();
+                    saveButton.remove();
+                };
+                listItem.appendChild(saveButton);
+                editInput.focus();
+            };
+
+            // Botão Excluir
+            const deleteButton = document.createElement('button');
+            deleteButton.textContent = 'Excluir';
+            deleteButton.className = 'px-3 py-1 bg-red-500 text-white rounded-md text-sm hover:bg-red-600 transition duration-200';
+            deleteButton.onclick = async () => {
+                await deleteItemFromFirestore(listType, docId);
+                // A remoção do DOM será feita automaticamente pelo onSnapshot
+            };
+
+            buttonsDiv.appendChild(editButton);
+            buttonsDiv.appendChild(deleteButton);
+
+            listItem.appendChild(textSpan);
+            listItem.appendChild(buttonsDiv);
+
+            listUl.appendChild(listItem);
+        }
+
+        // --- Event Listeners dos Botões de Adicionar ---
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const necaInput = document.getElementById('neca-input');
+            const necaAddButton = document.getElementById('neca-add');
+            const necoInput = document.getElementById('neco-input');
+            const necoAddButton = document.getElementById('neco-add');
+
+            necaAddButton.addEventListener('click', async () => {
+                const itemText = necaInput.value.trim();
+                if (itemText !== '') {
+                    await addItemToFirestore('neca', itemText);
+                    necaInput.value = '';
+                }
+            });
+
+            necaInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    necaAddButton.click();
+                }
+            });
+
+            necoAddButton.addEventListener('click', async () => {
+                const itemText = necoInput.value.trim();
+                if (itemText !== '') {
+                    await addItemToFirestore('neco', itemText);
+                    necoInput.value = '';
+                }
+            });
+
+            necoInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    necoAddButton.click();
+                }
+            });
+
+            initializeFirebaseAndAuth(); // Inicia a autenticação e o carregamento de dados
+        });
+    </script>
+    <style>
+        /* Define a fonte Inter para todo o corpo */
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Evita rolagem desnecessária se o conteúdo exceder */
+        }
+
+        /* Define a altura total para html e body para preencher a tela */
+        html, body, #app {
+            height: 100%;
+        }
+
+        /* Estilo base para os lados rosa e azul */
+        .side {
+            flex: 1; /* Faz com que cada lado ocupe metade da largura disponível */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem; /* Espaçamento interno para o conteúdo */
+            box-sizing: border-box; /* Inclui padding na largura/altura total */
+        }
+
+        /* Cor de fundo para o lado rosa */
+        .pink-bg {
+            background-color: #ffe4e6; /* Rosa claro */
+        }
+
+        /* Cor de fundo para o lado azul */
+        .blue-bg {
+            background-color: #e0f2fe; /* Azul claro */
+        }
+
+        /* Estilo para o contêiner da lista com opacidade reduzida */
+        .list-container {
+            background-color: rgba(255, 255, 255, 0.7); /* Branco com 70% de opacidade */
+            padding: 2rem;
+            border-radius: 1rem;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1); /* Sombra suave */
+            max-width: 90%; /* Limita a largura máxima para responsividade */
+            width: 400px; /* Largura fixa em telas maiores */
+            display: flex;
+            flex-direction: column;
+            gap: 1rem; /* Espaçamento entre os elementos internos */
+        }
+
+        /* Estilo para os itens da lista */
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            background-color: #f9fafb; /* Fundo mais claro para os itens */
+            border-radius: 0.5rem;
+            border: 1px solid #e5e7eb; /* Borda sutil */
+            word-break: break-word; /* Quebra de linha para textos longos */
+        }
+
+        /* Estilo para os botões dentro dos itens da lista */
+        .list-item-buttons {
+            display: flex;
+            gap: 0.5rem; /* Espaçamento entre os botões */
+            margin-left: 1rem; /* Margem à esquerda para separar do texto */
+        }
+
+        /* Responsividade para telas menores (smartphones) */
+        @media (max-width: 768px) {
+            #app {
+                flex-direction: column; /* Empilha os lados verticalmente */
+            }
+            .side {
+                height: 50%; /* Cada lado ocupa metade da altura */
+                width: 100%; /* Ocupa a largura total */
+                padding: 1rem; /* Reduz o padding nos lados para telas pequenas */
+            }
+            .list-container {
+                max-width: 95%; /* Ajusta a largura máxima para telas muito pequenas */
+                padding: 1.25rem; /* Reduz o padding do container da lista */
+                width: auto; /* Permite que a largura seja fluida */
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div id="app" class="flex flex-col md:flex-row w-full h-full">
+        <!-- Lado NECA (Rosa) -->
+        <div class="side pink-bg">
+            <div class="list-container">
+                <h2 class="text-3xl font-bold text-gray-800 text-center mb-4">NECA</h2>
+                <div class="flex flex-col sm:flex-row gap-2 w-full">
+                    <input type="text" id="neca-input" placeholder="Adicionar novo item NECA"
+                           class="flex-grow p-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-pink-500 transition duration-200">
+                    <button id="neca-add"
+                            class="px-5 py-3 bg-pink-500 text-white font-semibold rounded-lg shadow-md hover:bg-pink-600 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-opacity-75 transition duration-200">
+                        Adicionar
+                    </button>
+                </div>
+                <ul id="neca-list" class="space-y-3">
+                    <!-- Itens da lista NECA serão adicionados aqui -->
+                </ul>
+            </div>
+        </div>
+
+        <!-- Lado NECO (Azul) -->
+        <div class="side blue-bg">
+            <div class="list-container">
+                <h2 class="text-3xl font-bold text-gray-800 text-center mb-4">NECO</h2>
+                <div class="flex flex-col sm:flex-row gap-2 w-full">
+                    <input type="text" id="neco-input" placeholder="Adicionar novo item NECO"
+                           class="flex-grow p-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200">
+                    <button id="neco-add"
+                            class="px-5 py-3 bg-blue-500 text-white font-semibold rounded-lg shadow-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-75 transition duration-200">
+                        Adicionar
+                    </button>
+                </div>
+                <ul id="neco-list" class="space-y-3">
+                    <!-- Itens da lista NECO serão adicionados aqui -->
+                </ul>
+            </div>
+        </div>
+    </div>
+    <!-- Exibe o ID do usuário -->
+    <div id="user-id-display" class="absolute top-4 right-4 text-gray-600 text-sm bg-white p-2 rounded-md shadow-sm">
+        Carregando ID...
+    </div>
+    <!-- Caixa de mensagens para feedback -->
+    <div id="message-box" class="fixed bottom-4 left-1/2 -translate-x-1/2 p-3 rounded-lg shadow-lg text-white opacity-0 transition-opacity duration-300"></div>
+</body>
+</html>
