@@ -20,7 +20,7 @@
         let app;
         let db;
         let auth;
-        let userId = 'loading...'; // Será atualizado após a autenticação
+        let userId = null; // Inicializa como null para indicar que ainda não foi definido
 
         // --- Funções Auxiliares ---
         function showMessage(message, isError = false) {
@@ -33,6 +33,26 @@
             }, 3000); // Esconde a mensagem após 3 segundos
         }
 
+        function setInteractiveState(enabled) {
+            const elementsToControl = [
+                document.getElementById('neca-input'),
+                document.getElementById('neca-add'),
+                document.getElementById('neco-input'),
+                document.getElementById('neco-add')
+            ];
+
+            elementsToControl.forEach(element => {
+                if (element) { // Verifica se o elemento existe
+                    element.disabled = !enabled;
+                    if (enabled) {
+                        element.classList.remove('opacity-50', 'cursor-not-allowed');
+                    } else {
+                        element.classList.add('opacity-50', 'cursor-not-allowed');
+                    }
+                }
+            });
+        }
+
         // --- Inicialização do Firebase e Autenticação ---
         async function initializeFirebaseAndAuth() {
             try {
@@ -40,11 +60,15 @@
                 db = getFirestore(app);
                 auth = getAuth(app);
 
+                // Desativa os controles enquanto o Firebase está inicializando/autenticando
+                setInteractiveState(false);
+
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
                         document.getElementById('user-id-display').textContent = `Seu ID: ${userId}`;
                         console.log("Usuário autenticado:", userId);
+                        setInteractiveState(true); // Ativa os controles
                         // Carrega os dados somente após o usuário estar autenticado
                         loadListItems('neca');
                         loadListItems('neco');
@@ -55,18 +79,23 @@
                             } else {
                                 await signInAnonymously(auth);
                             }
+                            // onAuthStateChanged será chamado novamente com o usuário autenticado
                         } catch (error) {
                             console.error("Erro na autenticação:", error);
                             showMessage("Erro ao autenticar. Tente novamente.", true);
                             // Define um ID de usuário temporário se a autenticação falhar
                             userId = `anon-${crypto.randomUUID().substring(0, 8)}`;
                             document.getElementById('user-id-display').textContent = `Seu ID (Anônimo): ${userId}`;
+                            setInteractiveState(true); // Ativa os controles mesmo com ID anônimo
+                            loadListItems('neca');
+                            loadListItems('neco');
                         }
                     }
                 });
             } catch (error) {
                 console.error("Erro ao inicializar Firebase:", error);
                 showMessage("Erro ao inicializar o aplicativo. Recarregue a página.", true);
+                setInteractiveState(false); // Mantém desativado se houver erro crítico
             }
         }
 
@@ -82,7 +111,7 @@
         async function addItemToFirestore(listType, text) {
             if (!db || !userId) {
                 console.warn("Firestore não inicializado ou userId não disponível.");
-                showMessage("Aguarde a inicialização.", true);
+                showMessage("Aguarde a inicialização completa do aplicativo.", true);
                 return;
             }
             try {
@@ -103,7 +132,7 @@
         async function updateItemInFirestore(listType, docId, newText) {
             if (!db || !userId) {
                 console.warn("Firestore não inicializado ou userId não disponível.");
-                showMessage("Aguarde a inicialização.", true);
+                showMessage("Aguarde a inicialização completa do aplicativo.", true);
                 return;
             }
             try {
@@ -123,7 +152,7 @@
         async function deleteItemFromFirestore(listType, docId) {
             if (!db || !userId) {
                 console.warn("Firestore não inicializado ou userId não disponível.");
-                showMessage("Aguarde a inicialização.", true);
+                showMessage("Aguarde a inicialização completa do aplicativo.", true);
                 return;
             }
             try {
@@ -141,9 +170,6 @@
                 console.warn("Firestore não inicializado ou userId não disponível para carregar.");
                 return;
             }
-            // Importante: orderBy("timestamp", "asc") é usado para manter a ordem,
-            // mas se precisar de filtragem complexa ou ordenação por múltiplos campos
-            // em grandes datasets, pode ser necessário criar índices no Firestore.
             const q = query(collection(db, getCollectionPath(listType)), orderBy("timestamp", "asc"));
 
             onSnapshot(q, (snapshot) => {
@@ -233,6 +259,9 @@
             const necaAddButton = document.getElementById('neca-add');
             const necoInput = document.getElementById('neco-input');
             const necoAddButton = document.getElementById('neco-add');
+
+            // Inicialmente desativa os controles
+            setInteractiveState(false);
 
             necaAddButton.addEventListener('click', async () => {
                 const itemText = necaInput.value.trim();
